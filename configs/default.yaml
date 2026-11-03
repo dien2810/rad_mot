@@ -1,0 +1,67 @@
+# Default parameters. Every key maps to a field of the dataclasses in rad/.
+# SMP hyper-parameters marked (*) are NOT given in the SMP paper; they are our choices
+# and should be tuned on DanceTrack val to reproduce the paper's +8.0 HOTA first.
+
+bytetrack:
+  track_thresh: 0.5
+  low_thresh: 0.1
+  match_thresh: 0.8
+  second_thresh: 0.5
+  unconfirmed_thresh: 0.7
+  track_buffer: 30
+  fuse_score: true
+  class_aware: false
+
+smp:
+  tau_entry: 0.05        # paper sweeps 0.010 / 0.025 / 0.050
+  gap_G: 5               # (*)
+  witness: true
+  witness_iou: 0.0
+  n_seed: 3              # (*)
+  tau_seed: 0.2          # (*)
+  iso_iou: 0.0           # "no nearby overlapping boxes"
+  max_lookback: 60       # (*)
+  n_exit: 5              # (*)
+  tau_ioma: 0.5          # (*)
+  tau_box_cov: 0.3       # (*) our addition: mask must also fill the box
+  tau_ioma_second: 0.2   # (*)
+  mask_iso_frac: 0.15    # (*)
+  max_len: 150           # (*) frames per window
+  degrade_ratio: 0.25    # (*)
+  degrade_frames: 5      # (*)
+  max_occluded: 30       # (*)
+
+candidates:
+  relax_margin: 0.3
+  low_margin: 0.1
+  birth_window: 30
+  birth_radius: 3.0
+  include_births: true
+
+# GT classes that are regions, not objects (FastTracker: 9 = ignore_region, see rad/classes.py).
+# Their rows are removed from GT; GT objects, detections and tracker outputs lying mostly
+# inside a region of the same frame (intersection / box area > det_ignore_ioa) are dropped too.
+# Harmless on MOT17 (9 = occluder) and DanceTrack (class 1 only).
+gt_ignore_classes: [9]
+det_ignore_ioa: 0.5
+
+# Oracle detections built from GT (use to study association without a detector)
+oracle_dets:
+  vis_min: 0.2
+  drop_rate: 0.0
+  jitter: 0.0
+
+# Oracle VOS backend (CPU): follows the GT object; empty mask below vis_min
+oracle_backend:
+  vis_min: 0.3
+  drift_prob: 0.0
+
+# SAM 3 backend (GPU). precision: auto (SAM 3 default bf16) or fp16 (experimental, T4)
+sam3_backend:
+  precision: auto
+  offload_video_to_cpu: true
+
+sweep:
+  taus: [0.01, 0.025, 0.05, 0.1]
+  budgets: [0.25, 0.5, 1.0, 1.5, 2.0]   # x number of SMP(tau=0.05) triggers
+  random_seeds: [0, 1, 2]
