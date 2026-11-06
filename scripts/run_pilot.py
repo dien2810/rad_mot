@@ -45,6 +45,8 @@ def main() -> None:
                     help="density used for every H1/H2 bin (default: GT objects per frame)")
     ap.add_argument("--no-witness", action="store_true", help="disable witness windows")
     ap.add_argument("--witness-iou", type=float, default=None, help="override smp.witness_iou")
+    ap.add_argument("--precision", choices=["auto", "fp16"], default=None,
+                    help="SAM 3 precision, overrides sam3_backend.precision in the config")
     args = ap.parse_args()
     cfg = load_config(args.config)
     smp = cfg["smp"]
@@ -63,14 +65,27 @@ def main() -> None:
         ign = dict(ignore_classes=cfg["gt_ignore_classes"], ignore_ioa=cfg["det_ignore_ioa"])
         _, gt_vis = load_gt(s, **ign)
         det = load_detections(s, args.dets, args.det_dir, cfg["oracle_dets"], gt_vis=gt_vis, **ign)
+        if len(det) == 0:
+            hint = ""
+            if args.dets == "dir":
+                f = os.path.join(args.det_dir or "", s.name + ".txt")
+                hint = (f" ({f} is empty)" if os.path.exists(f) else
+                        f" (no file {f}: detect_yolo.py skips sequences without img1/ frames)")
+            print(f"[skip] {s.name}: 0 detections{hint}")
+            continue
         data.append(prepare(s, det, cfg["bytetrack"], cfg["candidates"], out_dir=args.out,
                             **ign))
         print(f"[track] {s.name}: {len(det)} dets, {len(data[-1].tracks)} track boxes ({time.time() - t:.1f}s)")
-    kw = cfg["oracle_backend"] if args.backend == "oracle" else cfg["sam3_backend"]
+    if not data:
+        sys.exit("no sequence has detections; nothing to run")
+    kw = dict(cfg["oracle_backend"] if args.backend == "oracle" else cfg["sam3_backend"])
+    if args.backend == "sam3" and args.precision:
+        kw["precision"] = args.precision
     res = run_pilot(data, args.backend, smp, args.out, backend_kw=kw, density=args.density)
     note = (f"data={args.data} dets={args.dets} backend={args.backend} density={args.density} "
             f"witness={smp.witness} witness_iou={smp.witness_iou}. "
-            "Oracle backend = GT-following VOS (upper bound for VOS quality).")
+            "Oracle backend = GT-following VOS: near upper bound with oracle detections; with detector boxes "
+            "it cannot follow a box that matches no GT object (compare with SAM 3: scripts/compare_backends.py).")
     report = write_report(res, args.out, note)
     plots = plot_summary(res, args.out)
     print(res["per_sequence"].round(3).to_string())

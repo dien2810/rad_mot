@@ -14,6 +14,8 @@ rad/
   eval/trackeval_runner.py  HOTA/MOTA/IDF1 qua TrackEval
   sam/smp.py             Selective Mask Propagation cài lại (cửa sổ, mồi, IoMA, SWAP)
   sam/backends.py        OracleBackend (CPU, theo GT) và Sam3Backend (GPU)
+  sam/record.py          ghi mask từng cửa sổ (cho demo) và cache cửa sổ trùng giữa các chính sách
+  viz/demo.py            vẽ video demo (lưới 2x2, mask, sự kiện, biểu đồ chi phí)
   dispatch/candidates.py sự kiện ứng viên + đặc trưng (gồm ứng viên "birth" cho lỗi đứt track)
   dispatch/labels.py     nhãn y_risk (từ GT) và y_fix (chạy thử cửa sổ)
   dispatch/model.py      gradient boosting, out-of-fold theo sequence
@@ -24,6 +26,8 @@ rad/
 scripts/                 các lệnh chạy (xem bên dưới), gồm estimate_gpu_time.py để ước lượng giờ GPU
 configs/default.yaml     toàn bộ tham số
 notebooks/colab_pipeline.ipynb  chạy trên Colab/Kaggle
+notebooks/colab_demo.ipynb      SAM 3 cho các video còn lại, so oracle với SAM 3, video demo
+demo/index.html          trang phân tích lỗi (tải clip.mp4 + bundle.json), dữ liệu mẫu trong demo/sample/
 tests/                   kiểm thử nhanh (python -m pytest -q)
 ```
 
@@ -145,9 +149,20 @@ python scripts/smoke_sam3.py --data datasets/FastTracker/train --frame 100 --obj
 python scripts/run_dispatch.py --data datasets/FastTracker/train --dets oracle --backend oracle --label y_risk --out outputs/dispatch
 # nhãn y_fix (chạy thử cửa sổ để biết cửa sổ nào thật sự sửa được lỗi)
 python scripts/run_dispatch.py ... --label y_fix --fix-backend oracle
-# xác nhận với SAM 3 thật (GPU), có thể giới hạn vài sequence bằng --seqs
-python scripts/run_dispatch.py ... --backend sam3 --seqs <seq1> <seq2>
+# xác nhận với SAM 3 thật (GPU): chỉ 2 chính sách, chỉ các video có ảnh; mô hình vẫn học trên cả 12 video
+python scripts/run_dispatch.py --data datasets/FastTracker/train --dets oracle --backend sam3 --precision fp16 \
+    --policies smp:0.05 learned:1.0 --sweep-seqs task_day_left_turn task_tunnel --out outputs/dispatch_sam3
 ```
+
+Với SAM 3, cửa sổ trùng giữa các chính sách chỉ chạy một lần (cache). Kết quả từng video được ghi dần vào `sweep_per_sequence.partial.csv`. Nên ghi log ra Drive (`2>&1 | tee .../dispatch_sam3.log`) để biết lý do nếu phiên Colab bị ngắt. Ước tính với fp16 trên T4: khoảng 1.250 khung SAM 3 cho hai video, tức khoảng 30 phút, cộng thời gian dựng ByteTrack và huấn luyện mô hình rủi ro trên cả 12 video (CPU).
+
+So kết quả SAM 3 với lần quét oracle trên cùng video (chấp nhận cả file `.partial.csv` và nhiều thư mục `--b` khi chạy từng video một):
+
+```bash
+python scripts/compare_sweeps.py --a outputs/dispatch/sweep_per_sequence.csv --b outputs/dispatch_sam3 --out outputs/compare_sweeps
+```
+
+Với VOS oracle, trên `task_day_left_turn` + `task_tunnel`: SMP dùng 743 khung VOS, RAD 506 (tỷ lệ 0,68); IDSW 58 → SMP 58, RAD 56. Lần chạy SAM 3 cần cho kết quả tương tự thì kết luận "nửa chi phí" mới đứng được với VOS thật.
 
 Kết quả:
 - `model_metrics_*.json`: ROC-AUC, PR-AUC của mô hình so với dùng margin đơn thuần;
@@ -161,6 +176,49 @@ Các chính sách được so sánh:
 - `learned`: top-k theo xác suất rủi ro, với ngân sách bằng k lần số trigger của SMP;
 - `random`: chọn ngẫu nhiên cùng ngân sách.
 
+### Oracle VOS so với SAM 3, và video demo
+
+```bash
+# so từng cửa sổ giữa hai lần pilot dùng cùng detection (vd. YOLO + oracle và YOLO + SAM 3)
+python scripts/compare_backends.py --a outputs/pilot_yolo --b outputs/pilot_sam3 --out outputs/compare_oracle_sam3
+# video demo: ByteTrack | SMP | RAD | biểu đồ; tự chọn đoạn quanh một lỗi đổi ID được sửa
+python scripts/make_demo.py --data datasets/FastTracker/train --seq task_day_left_turn \
+    --dets dir --det-dir outputs/dets --backend sam3 --train-cands "outputs/dispatch/*/candidates.csv.gz" --out outputs/demo
+```
+
+`make_demo.py` với `--backend oracle` chạy trên CPU để xem trước; khi đó video vẽ hộp thay cho mask. Kết quả gồm `demo.mp4`, `keyframes/*.png`, `summary.json`, `events.csv` và `windows_*.csv`.
+
+### Demo cho buổi báo cáo
+
+Hai cách, dùng chung `make_demo.py`:
+
+1. **Trang phân tích lỗi** `demo/index.html` (mở trực tiếp bằng trình duyệt, không cần cài gì). Tải `clip.mp4` và `bundle.json` do `make_demo.py` xuất ra; trang phát lại video với hộp của ByteTrack, SMP hoặc RAD, đánh dấu lỗi đổi ID (đã sửa, còn lại, phát sinh), cửa sổ SAM 3 và dòng thời gian. Chép `bundle.js` và `clip.mp4` vào `demo/data/` thì trang tự mở kết quả đó, không cần tải lên. Không có dữ liệu thì trang mở dữ liệu mẫu tổng hợp trong `demo/sample/` (chỉ để xem giao diện).
+   ```bash
+   python scripts/make_demo.py --data $DATA --seq task_day_left_turn --backend sam3 --precision fp16 --frames-on-gpu \
+       --start 1674 --frames 289 --train-cands "$WORK/outputs/dispatch/*/candidates.csv.gz" --out $WORK/outputs/demo
+   ```
+2. **App Gradio chạy thật** trên Colab (GPU):
+   ```bash
+   pip -q install gradio
+   python scripts/demo_app.py --data $DATA --work $WORK --share
+   ```
+   Tab "Video FastTracker" chạy trên video có nhãn và đếm lỗi đổi ID. Tab "Video mới" nhận video bất kỳ, tách khung, chạy YOLO11 rồi ByteTrack, SMP, RAD với SAM 3; không có nhãn nên chỉ hiện cửa sổ và hoán đổi. Mỗi lần chạy trả về video 2×2, bảng tóm tắt và cặp `bundle.json` + `clip.mp4` cho trang ở mục 1.
+
+### Kiểm tra mẫu nhãn của các lỗi đổi ID
+
+Ở thiết lập oracle, mọi lỗi đổi ID đều bị tính cho tracker. Nếu chính nhãn ID của FastTracker sai (ID nhảy sang xe khác, một xe nhận ID mới), các "lỗi" đó là nhiễu nhãn. Script lấy mẫu ngẫu nhiên các lỗi (phân tầng theo loại: đứt track, hoán đổi, chiếm ID), cắt clip và ảnh ghép quanh từng lỗi để xem bằng mắt.
+
+```bash
+# 1) lấy mẫu 30 lỗi và dựng clip (CPU). --remote đọc đúng các khung cần từ zip trên Hugging Face
+#    (khoảng 20-40 MB mỗi lỗi), nên không cần tải ảnh của cả 12 video
+python scripts/spot_check_switches.py --data datasets/FastTracker/train --remote --out outputs/spot_check --n 30
+# 2) mở outputs/spot_check/index.html, chọn nhãn cho từng lỗi, bấm "Tải labels.csv", chép file vào thư mục đó
+# 3) tổng hợp: tỷ lệ lỗi do nhãn kèm khoảng Wilson 95%, theo loại lỗi, và số lỗi ước tính trên toàn bộ
+python scripts/spot_check_switches.py --summarize outputs/spot_check/labels.csv
+```
+
+Nhãn: `tracker` (tracker đổi ID thật, nhãn nhất quán), `gt_id` (ID trong nhãn sai), `gt_box` (lỗi hộp nhãn khác: thiếu, lệch, trùng), `unclear`. Các cột gợi ý trong `labels.csv` (`gt_gap_before`, `gt_iou_min`, `gt_vis`, `n_gt_overlap`, `gt_dup`) chỉ để định hướng, không thay cho việc xem clip; ví dụ `gt_iou_min` gần 0 nghĩa là hộp GT nhảy chỗ giữa hai khung liền nhau. Không có `--remote`/`--zip-dir` thì chỉ các video có `img1/` được lấy mẫu, và báo cáo ghi rõ điều đó.
+
 ## Những điều cần ghi rõ khi báo cáo
 
 1. **SMP là bản cài lại.** Bài gốc không công bố mã nguồn và phần lớn siêu tham số. Các giá trị đánh dấu (*) trong `configs/default.yaml` là do mình chọn. Nên kiểm tra trên DanceTrack val trước (bài gốc báo SAM 3 + Deep-EIoU tăng 8,0 HOTA). Dữ liệu tải tại https://github.com/DanceTrack/DanceTrack.
@@ -171,8 +229,10 @@ Các chính sách được so sánh:
    - Hai cửa sổ cùng mô tả một sự kiện (A→B và B→A, hoặc hai cửa sổ chồng thời gian trên cùng cặp) chỉ được áp dụng một lần.
    - Witness được chạy thành các cửa sổ riêng; bài gốc không nói rõ cách làm.
 3. **Visibility của FastTracker là hằng số 1.0.** Code ước lượng che khuất từ hình học box (`rad/occlusion.py`, box nằm thấp hơn trong ảnh được coi là gần camera hơn) cho detection oracle và VOS oracle. Đây là xấp xỉ, cần nêu rõ khi báo cáo.
-4. **VOS oracle là cận trên,** không phải kết quả của SAM. Kết luận cuối cùng phải xác nhận lại bằng `--backend sam3`.
+4. **VOS oracle không phải kết quả của SAM.** Với detection oracle, nó gần như là cận trên của chất lượng VOS. Với detection YOLO thì **không**: oracle chỉ bám được box khớp với một đối tượng GT (IoU ≥ 0,3). Trên `task_day_left_turn`, có 4/19 cửa sổ mà SAM 3 chạy được còn oracle thì không. Kết luận cuối cùng phải xác nhận lại bằng `--backend sam3` và `compare_backends.py`.
 5. **Dữ liệu giả lập** (`scripts/make_synthetic.py`) chỉ dùng để kiểm tra mã chạy đúng. Không đưa số liệu từ dữ liệu này vào báo cáo như bằng chứng.
+6. **Nhãn của FastTracker chưa được kiểm chứng.** Bài gốc không mô tả quy trình gán nhãn. Ở thiết lập oracle, lỗi ID trong nhãn bị tính thành lỗi đổi ID của tracker. Dùng `spot_check_switches.py` để ước lượng tỷ lệ này và ghi vào báo cáo.
+7. **Với 12 video, khác biệt nhỏ về IDSW giữa các chính sách không có ý nghĩa thống kê.** Khi so sánh, báo cáo khoảng bootstrap theo video thay vì chỉ tổng số.
 
 ## Kiểm tra nhanh mã nguồn
 

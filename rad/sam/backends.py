@@ -13,6 +13,7 @@ Sam3Backend    - SAM 3 tracker (SAM 2 style API, box prompt), needs a CUDA GPU, 
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import shutil
 import tempfile
@@ -24,6 +25,23 @@ import numpy as np
 from rad.boxes import iou_matrix
 from rad.io.mot import ID, V, X, Y, W, H, Sequence, group_by_frame
 from rad.sam.masks import ArrayMask, BoxMask
+
+
+def rss_gb() -> float:
+    """Resident memory of this process in GB (psutil if present, else /proc; nan if unknown)."""
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / 1e9
+    except Exception:
+        try:
+            with open("/proc/self/status") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) * 1024 / 1e9
+        except OSError:
+            pass
+    return float("nan")
 
 
 class OracleBackend:
@@ -96,7 +114,7 @@ class Sam3Backend:
 
     def __init__(self, seq: Sequence, checkpoint_path: Optional[str] = None,
                  offload_video_to_cpu: bool = True, tmp_root: Optional[str] = None,
-                 score_thresh: float = 0.0, precision: str = "auto"):
+                 score_thresh: float = 0.0, precision: str = "auto", verbose: bool = True):
         if precision not in ("auto", "fp16"):
             raise ValueError("precision must be 'auto' or 'fp16'")
         self.precision = precision
@@ -110,6 +128,7 @@ class Sam3Backend:
         self.offload = offload_video_to_cpu
         self.tmp_root = tmp_root or tempfile.gettempdir()
         self.score_thresh = score_thresh
+        self.verbose = verbose  # one line per window: frames, time, RAM, GPU memory (find OOM causes)
         self.predictor = None
         self.frames_processed = 0
         self.calls = 0
@@ -186,6 +205,7 @@ class Sam3Backend:
         self.calls += 1
         clip = self._make_clip(start_frame, n)
         state = None
+        done = 0
         t0 = time.perf_counter()
         try:
             with torch.inference_mode(), self._autocast():
@@ -204,6 +224,7 @@ class Sam3Backend:
                     mask = (m > 0).cpu().numpy()
                     score = float(scores[0].flatten()[0]) if scores is not None else 0.0
                     self.frames_processed += 1
+                    done += 1
                     if score < self.score_thresh:
                         mask = np.zeros_like(mask)
                     yield start_frame + int(fi), ArrayMask(mask), score
@@ -211,11 +232,18 @@ class Sam3Backend:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 self.peak_mem_gb = max(self.peak_mem_gb, torch.cuda.max_memory_allocated() / 1e9)
-            self.gpu_seconds += time.perf_counter() - t0
+            dt = time.perf_counter() - t0
+            self.gpu_seconds += dt
             del state
-            shutil.rmtree(clip, ignore_errors=True)
+            shutil.rmtree(clip, ignore_errors=True)  # also stops SAM 3's frame-loading thread
+            gc.collect()  # the inference state holds the window's frames (~1.8 GB for 150 frames at 1008 px)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            if self.verbose:
+                gpu = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                print(f"[sam3] {self.seq.name} window {self.calls}: seed frame {start_frame}, {done} frames, "
+                      f"{dt:.0f}s, RAM {rss_gb():.1f} GB, GPU {gpu:.1f} GB (peak {self.peak_mem_gb:.1f})",
+                      flush=True)
 
     def stats(self) -> dict:
         return dict(calls=self.calls, frames=self.frames_processed, seconds=self.gpu_seconds,

@@ -169,6 +169,8 @@ def pilot_tables(seq: str, gt: np.ndarray, trk: np.ndarray, log: pd.DataFrame, w
     dens = density_per_frame(gt if density == "gt" else trk, length)
     out: dict = {}
     # H1a: share of matched pairs below each margin threshold, by density
+    if len(log) == 0 or "frame" not in log:  # no association at all (e.g. a sequence without detections)
+        log = pd.DataFrame(columns=["frame", "track_id", "stage", "margin_det", "gap"])
     lg = log[log.stage.isin([1, 2])].copy() if "stage" in log else log.copy()
     lg["density"] = lg.frame.map(dens).fillna(0)
     for t in taus:

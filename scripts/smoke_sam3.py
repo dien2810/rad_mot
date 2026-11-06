@@ -35,7 +35,15 @@ def main() -> None:
     args = ap.parse_args()
     print("GPU:", Sam3Backend.gpu_info())
     seqs = discover_sequences(args.data)
-    seq = next((s for s in seqs if s.name == args.seq), seqs[0])
+    if args.seq:
+        seq = next((s for s in seqs if s.name == args.seq), None)
+        if seq is None:
+            sys.exit(f"no sequence named {args.seq} in {args.data}")
+    else:  # default: the first sequence whose frames were downloaded (--mode gt has no img1/)
+        seq = next((s for s in seqs if s.frame_paths()), None)
+        if seq is None:
+            sys.exit("no sequence has img1/ frames yet: run scripts/download_fasttracker.py --mode full --seqs <name>")
+    print("sequence:", seq.name)
     gt = seq.load_gt()
     rows = gt[gt[:, F] == args.frame]
     rows = rows[np.argsort(-(rows[:, W] * rows[:, H]))][: args.objects]

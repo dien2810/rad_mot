@@ -172,14 +172,24 @@ def train_risk(data: list[SeqData], label: str = "y_risk", kind: str = "hgb") ->
 
 def sweep(data: list[SeqData], backend: str, smp: SMPParams, score_col: str,
           taus=(0.01, 0.025, 0.05, 0.1), budgets=(0.25, 0.5, 1.0, 1.5, 2.0),
-          backend_kw: Optional[dict] = None, seeds=(0,)) -> pd.DataFrame:
+          backend_kw: Optional[dict] = None, seeds=(0,), only: Optional[set] = None,
+          seqs: Optional[set] = None, partial_path: Optional[str] = None) -> pd.DataFrame:
     """Compare policies on cost (windows, VOS frames) vs accuracy (IDSW, IDF1).
 
     Budgets are multiples of the number of SMP(tau=0.05) triggers of each sequence, so
     learned / random policies are compared at matched trigger counts.
+    only: {(policy, param)} to run, e.g. {("smp", 0.05), ("learned", 1.0)} (SAM 3 runs).
+    seqs: names of the sequences to sweep (the risk model may still be trained on all).
+    With the SAM 3 backend, sequences without img1/ frames are skipped.
+    partial_path: CSV rewritten after every sequence (keeps results if the session dies).
     """
     rows = []
     for sd in data:
+        if seqs and sd.name not in seqs:
+            continue
+        if backend == "sam3" and (sd.seq is None or not sd.seq.frame_paths()):
+            print(f"[sweep] skip {sd.name}: no img1/ frames for SAM 3")
+            continue
         p = SMPParams(**{**asdict(smp), "image_size": sd.size})
         base = evaluate(sd.gt, sd.tracks)
         rows.append(dict(seq=sd.name, policy="bytetrack", param=0.0, windows=0, vos_frames=0, triggers=0,
@@ -197,7 +207,13 @@ def sweep(data: list[SeqData], backend: str, smp: SMPParams, score_col: str,
                               lambda n=n: pol.budget(sd.cands.dropna(subset=[score_col]), score_col, n)))
                 for s in seeds:
                     plans.append(("random", b, s, lambda n=n, s=s: pol.random_budget(sd.cands, n, s)))
+        if only is not None:
+            plans = [x for x in plans if (x[0], round(float(x[1]), 4)) in only]
         be = make_backend(backend, sd, **(backend_kw or {}))  # one per sequence (SAM 3 model is cached)
+        if backend == "sam3":  # policies often open the same window: run SAM 3 once (<= ~1 GB of masks)
+            from rad.sam.record import CachingBackend
+
+            be = CachingBackend(be, max_frames=4000)
         for name, param, seed_used, make in plans:
             trig = make()
             corrected, wins, stats = run_smp(sd.tracks, sd.log, be, trig, sd.length, p)
@@ -205,6 +221,9 @@ def sweep(data: list[SeqData], backend: str, smp: SMPParams, score_col: str,
             rows.append(dict(seq=sd.name, policy=name, param=float(param), seed=seed_used, windows=stats["windows"],
                              vos_frames=stats["vos_frames"], triggers=len(trig), idsw=ev["idsw"],
                              idf1=ev["idf1"], mota=ev["mota"], n_swap=stats.get("n_SWAP", 0)))
+        if partial_path:
+            os.makedirs(os.path.dirname(os.path.abspath(partial_path)), exist_ok=True)
+            pd.DataFrame(rows).to_csv(partial_path, index=False)
     return pd.DataFrame(rows)
 
 

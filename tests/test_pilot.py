@@ -69,3 +69,10 @@ def test_fixed_and_introduced_on_constructed_swap():
     w = tab["windows"]
     assert w.applied.sum() == 1 and w.wasted.sum() == w.ran.sum() - 1
     assert res["h2_by_type"].fixed.mean() == 1.0
+
+
+def test_pilot_tables_handles_sequence_without_detections():
+    gt = np.array([[1, 1, 0, 0, 10, 10, 1, 8, 1]], float)
+    trk = np.zeros((0, 9))
+    tab = pilot_tables("EMPTY", gt, trk, pd.DataFrame(), pd.DataFrame(), clear_match(gt, trk), length=3)
+    assert len(tab["pairs"]) == 0 and tab["frames"].windows_opened.sum() == 0
