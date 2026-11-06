@@ -24,15 +24,18 @@ tsc = _load("test_spot_check", os.path.join(ROOT, "test_spot_check.py"))
 
 def _ev(**kw):
     base = dict(seq="task_day_x", frame=100, gt_id=1, prev_trk=5, new_trk=12, type="fragment", box_w=120.0,
-                box_h=90.0, gt_gap_before=0, gt_iou_min=0.8, gt_vis=0.9, n_gt_overlap=1, gt_dup=1)
+                box_h=90.0, gt_gap_before=0, gt_iou_min=0.8, gt_vis=0.9, n_gt_overlap=1, gt_dup=1,
+                at_border=False, min_vis_before=0.9)
     base.update(kw)
     return base
 
 
 def test_pick_filters_and_ranks():
     pop = pd.DataFrame([
-        _ev(frame=100, box_h=90),                                   # kept, 2nd
-        _ev(frame=300, gt_id=2, box_h=150),                         # kept, best
+        _ev(frame=100, box_h=90, seq="task_day_z"),                 # kept, 3rd (at most 2 per sequence)
+        _ev(frame=300, gt_id=2, box_h=150),                         # kept, 2nd (larger)
+        _ev(frame=200, gt_id=9, box_h=70, min_vis_before=0.2),      # kept, best: occluded just before
+        _ev(frame=400, gt_id=10, box_h=500, box_w=60, at_border=True),  # leaving the image
         _ev(frame=500, gt_id=3, box_h=40),                          # too small
         _ev(frame=700, gt_id=4, gt_gap_before=40),                  # hole in the labels
         _ev(frame=900, gt_id=5, gt_dup=2),                          # duplicate GT id
@@ -42,7 +45,9 @@ def test_pick_filters_and_ranks():
     ])
     sel = ex.pick(pop, per_type=3, min_h=60)
     frag = sel[sel.type == "fragment"]
-    assert list(frag.frame) == [300, 100]
+    assert list(frag.frame) == [200, 300, 100]
+    assert 400 in list(ex.pick(pop, per_type=5, min_h=60, allow_border=True).frame)
+    assert set(ex.pick(pop, per_type=3, min_h=60, types=("swap",)).type) == {"swap"}
     assert list(sel[sel.type == "swap"].frame) == [1300]
     assert list(sel[sel.type == "takeover"].frame) == [1500]
 
@@ -53,7 +58,9 @@ def test_export_renders_clip_and_poster(tmp_path):
     seq = ex.discover_sequences(str(split))[0]
     tr = ex.sc.track_oracle(seq, cfg)
     cand = ex.candidates(seq, tr)
-    assert len(cand) >= 1 and {"box_h", "gt_gap_before", "type"} <= set(cand.columns)
+    assert len(cand) >= 1 and {"box_h", "gt_gap_before", "type", "at_border", "min_vis_before"} <= set(cand.columns)
+    assert ex.at_border(np.array([[1, 1, 2, 5, 40, 50, 1, 1, 1]], float), (640, 360))
+    assert not ex.at_border(np.array([[1, 1, 100, 100, 40, 50, 1, 1, 1]], float), (640, 360))
     ev = cand.iloc[0].to_dict()
     src, how = ex.sc.frame_source(seq, False, None)
     out = tmp_path / "clip.mp4"

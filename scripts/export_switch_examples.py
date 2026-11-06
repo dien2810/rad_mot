@@ -3,8 +3,9 @@
 
 Same setting as the 473 switches in the report: ByteTrack on oracle detections, switches
 counted with CLEAR-MOT and typed by rad.pilot.analysis.classify_switches. Events are filtered
-so that the clip is easy to read (one GT box per id, no jump of the GT box, a large object,
-daytime first), cropped around the event and drawn simply:
+so that the clip is easy to read (one GT box per id, no jump of the GT box, the object fully
+inside the image, a large object, daytime first; for fragment and takeover an object that was
+occluded just before), cropped around the event and drawn simply:
 
   blue box   the track that followed the object before the switch ("ID a")
   orange box the track that follows it after the switch ("ID b")
@@ -35,7 +36,7 @@ sys.path.insert(0, HERE)
 import spot_check_switches as sc  # noqa: E402
 from rad.boxes import iou_matrix  # noqa: E402
 from rad.config import load_config  # noqa: E402
-from rad.io.mot import F, H, ID, W, discover_sequences, group_by_frame  # noqa: E402
+from rad.io.mot import F, H, ID, V, W, X, Y, discover_sequences, group_by_frame  # noqa: E402
 from rad.pilot.analysis import classify_switches  # noqa: E402
 from rad.viz.demo import Text, VideoWriter, View, _dashed_rect, bgr, draw_texts  # noqa: E402
 
@@ -48,29 +49,56 @@ NAVY = (34, 53, 77)
 PW, PH = 960, 540
 
 
+def at_border(rows: np.ndarray, size: tuple, margin: float = 0.01) -> bool:
+    """True if any of these GT boxes touches the image border (object entering or leaving)."""
+    if len(rows) == 0:
+        return False
+    w_img, h_img = size
+    m = margin * w_img
+    return bool(((rows[:, X] < m) | (rows[:, Y] < m) | (rows[:, X] + rows[:, W] > w_img - m)
+                 | (rows[:, Y] + rows[:, H] > h_img - m)).any())
+
+
 def candidates(seq, tr: dict) -> pd.DataFrame:
-    """Every switch of a sequence with the readability hints used to rank them."""
+    """Every switch of a sequence with the readability hints used to rank them.
+
+    at_border        the object touches the image border within 3 frames of the switch: a new id
+                     on an object that is leaving or entering, a poor example of the mechanism
+    min_vis_before   lowest estimated visibility in the 30 frames before the switch (occlusion)
+    """
     sw = classify_switches(tr["cm"], tr["tracks"])
-    gt = tr["gt"]
+    gt, vis = tr["gt"], tr["gt_vis"]
+    size = (seq.width or 1920, seq.height or 1080)
     rows = []
     for ev in sw.to_dict("records"):
         f, gid = int(ev["frame"]), int(ev["gt_id"])
-        me = gt[(gt[:, ID].astype(int) == gid) & (gt[:, F].astype(int) == f)]
+        mine = gt[gt[:, ID].astype(int) == gid]
+        fr = mine[:, F].astype(int)
+        me = mine[fr == f]
+        vmine = vis[vis[:, ID].astype(int) == gid]
+        vb = vmine[(vmine[:, F] >= f - 30) & (vmine[:, F] < f), V]
         rows.append({"seq": seq.name, "frame": f, "gt_id": gid, "prev_trk": int(ev["prev_trk"]),
                      "new_trk": int(ev["new_trk"]), "type": ev["type"],
                      "box_w": float(me[0, W]) if len(me) else 0.0, "box_h": float(me[0, H]) if len(me) else 0.0,
-                     **sc.gt_hints(gt, tr["gt_vis"], gid, f)})
+                     "at_border": at_border(mine[np.abs(fr - f) <= 3], size),
+                     "min_vis_before": round(float(vb.min()), 2) if len(vb) else float("nan"),
+                     **sc.gt_hints(gt, vis, gid, f)})
     return pd.DataFrame(rows)
 
 
-def pick(pop: pd.DataFrame, per_type: int, min_h: float) -> pd.DataFrame:
-    """Readable events first: one GT box, no GT jump, a large object, daytime, spread over sequences."""
+def pick(pop: pd.DataFrame, per_type: int, min_h: float, types=("fragment", "swap", "takeover"),
+         allow_border: bool = False) -> pd.DataFrame:
+    """Readable events first: one GT box, no GT jump, inside the image, a large object, daytime,
+    occluded just before (fragment, takeover), spread over sequences."""
     ok = (pop.gt_dup == 1) & (pop.box_h >= min_h) & (pop.gt_iou_min.isna() | (pop.gt_iou_min >= 0.5))
     ok &= ~((pop.type == "fragment") & (pop.gt_gap_before > 2))  # tracker error, not a hole in the labels
-    pop = pop[ok].assign(day=pop.seq.str.contains("day").astype(int))
+    if not allow_border:
+        ok &= ~pop.at_border.astype(bool)
+    pop = pop[ok].assign(day=pop.seq.str.contains("day").astype(int), area=pop.box_w * pop.box_h,
+                         occluded=((pop.min_vis_before < 0.5) & pop.type.isin(["fragment", "takeover"])).astype(int))
     chosen = []
-    for typ in ("fragment", "swap", "takeover"):
-        sub = pop[pop.type == typ].sort_values(["day", "box_h"], ascending=False)
+    for typ in types:
+        sub = pop[pop.type == typ].sort_values(["occluded", "day", "area"], ascending=False)
         used_seq: dict = {}
         for r in sub.to_dict("records"):
             if sum(1 for c in chosen if c["type"] == typ) >= per_type:
@@ -157,6 +185,9 @@ def main() -> None:
     ap.add_argument("--pre", type=float, default=1.5, help="seconds before the switch")
     ap.add_argument("--post", type=float, default=1.5, help="seconds after the switch")
     ap.add_argument("--speed", type=float, default=0.5, help="playback speed (0.5 = half speed)")
+    ap.add_argument("--types", nargs="*", default=["fragment", "swap", "takeover"],
+                    choices=["fragment", "swap", "takeover"], help="switch types to export")
+    ap.add_argument("--allow-border", action="store_true", help="also pick objects touching the image border")
     ap.add_argument("--remote", action="store_true", help="read frames from the Hugging Face zips")
     ap.add_argument("--zip-dir", default=None, help="folder with downloaded <sequence>.zip files")
     args = ap.parse_args()
@@ -176,8 +207,13 @@ def main() -> None:
     if not pops:
         sys.exit("no switch in a sequence with frames; add --remote or --zip-dir")
     pop = pd.concat(pops, ignore_index=True)
+    pop.to_csv(os.path.join(args.out, "switches_all.csv"), index=False)
     print("[all] by type:", pop.type.value_counts().to_dict())
-    sel = pick(pop, args.per_type, args.min_h)
+    edge = pop.groupby("type").at_border.agg(["sum", "count"])
+    print("[all] object at the image border (±3 frames):",
+          {t: f"{int(r['sum'])}/{int(r['count'])}" for t, r in edge.iterrows()},
+          f"total {int(pop.at_border.sum())}/{len(pop)}")
+    sel = pick(pop, args.per_type, args.min_h, tuple(args.types), args.allow_border)
     if sel.empty:
         sys.exit("no readable switch; lower --min-h")
     rows = []
