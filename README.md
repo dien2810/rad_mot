@@ -219,6 +219,16 @@ python scripts/spot_check_switches.py --summarize outputs/spot_check/labels.csv
 
 Nhãn: `tracker` (tracker đổi ID thật, nhãn nhất quán), `gt_id` (ID trong nhãn sai), `gt_box` (lỗi hộp nhãn khác: thiếu, lệch, trùng), `unclear`. Các cột gợi ý trong `labels.csv` (`gt_gap_before`, `gt_iou_min`, `gt_vis`, `n_gt_overlap`, `gt_dup`) chỉ để định hướng, không thay cho việc xem clip; ví dụ `gt_iou_min` gần 0 nghĩa là hộp GT nhảy chỗ giữa hai khung liền nhau. Không có `--remote`/`--zip-dir` thì chỉ các video có `img1/` được lấy mẫu, và báo cáo ghi rõ điều đó.
 
+### Clip ví dụ thật cho ba kiểu lỗi (dùng cho slide)
+
+Cùng thiết lập với 473 lỗi trong báo cáo (ByteTrack trên phát hiện oracle). Script chọn các lỗi dễ nhìn (một hộp GT mỗi ID, hộp GT không nhảy, vật đủ lớn, ưu tiên ban ngày; với đứt track thì nhãn phải liên tục để chắc là lỗi của tracker), cắt quanh lỗi và vẽ gọn: xanh là track trước lỗi, cam là track sau lỗi, khung trắng nét đứt là vật lúc không có track nào bám, nhãn đỏ "đổi ID a→b" từ khung lỗi.
+
+```bash
+python scripts/export_switch_examples.py --data datasets/FastTracker/train --remote --out outputs/switch_examples --per-type 3
+```
+
+Kết quả: `fragment_1.mp4`, `swap_1.mp4`, `takeover_1.mp4`… (960×540, phát chậm 2 lần), ảnh `.png` cùng tên và `examples.csv`. Vẫn cần xem bằng mắt để chọn: một "lỗi" có thể là lỗi nhãn. Trên Colab (chỉ CPU) dùng `notebooks/colab_switch_examples.ipynb`: notebook tự clone repo, tải nhãn, cắt clip, cho xem từng clip và tải 3 clip đã chọn về máy.
+
 ## Những điều cần ghi rõ khi báo cáo
 
 1. **SMP là bản cài lại.** Bài gốc không công bố mã nguồn và phần lớn siêu tham số. Các giá trị đánh dấu (*) trong `configs/default.yaml` là do mình chọn. Nên kiểm tra trên DanceTrack val trước (bài gốc báo SAM 3 + Deep-EIoU tăng 8,0 HOTA). Dữ liệu tải tại https://github.com/DanceTrack/DanceTrack.

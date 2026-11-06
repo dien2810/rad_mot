@@ -309,7 +309,7 @@ def draw_panel(canvas: np.ndarray, texts: list[Text], ox: int, oy: int, pw: int,
             bb = _track_box(pd_.by_frame, f, a) if _track_box(pd_.by_frame, f, a) is not None else _track_box(pd_.by_frame, f, b_id)
             if bb is not None:
                 vb = view.box(bb)
-                texts.append(Text(ox + vb[0], oy + vb[3] + 3, f"sửa ID {a}↔{b_id}", fs(13), (255, 255, 255),
+                texts.append(Text(ox + vb[0], oy + vb[3] + 3, f"sửa ID {b_id}→{a}", fs(13), (255, 255, 255),
                                   bg=FIXED, bold=True, anchor="la"))
     if len(pd_.switches):
         recent = pd_.switches[(pd_.switches.frame <= f) & (pd_.switches.frame >= f - 24)]
