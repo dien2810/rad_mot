@@ -164,6 +164,23 @@ python scripts/compare_sweeps.py --a outputs/dispatch/sweep_per_sequence.csv --b
 
 Với VOS oracle, trên `task_day_left_turn` + `task_tunnel`: SMP dùng 743 khung VOS, RAD 506 (tỷ lệ 0,68); IDSW 58 → SMP 58, RAD 56. Lần chạy SAM 3 cần cho kết quả tương tự thì kết luận "nửa chi phí" mới đứng được với VOS thật.
 
+**SAM 3 trên cả 12 video, có đo thời gian từng cách.** Dùng `scripts/run_sam3_dispatch.py`. Trên Colab, mở `notebooks/colab_sam3_all.ipynb` với T4 rồi bấm Run all. Script khác `run_dispatch.py` ở bốn điểm:
+
+- **Đo thời gian riêng từng cách:** mỗi chính sách có bộ nhớ đệm SAM 3 riêng, và RAD chạy trước, nên thời gian của mỗi cách là thời gian nó tự chạy một mình.
+- **Ghi thời gian từng bước:** ByteTrack, tạo ứng viên và đặc trưng, chấm điểm rủi ro, cửa sổ SAM 3. Từ đó tính FPS cả chuỗi (chưa tính detector).
+- **Ghi kết quả ngay sau mỗi video** vào `per_seq/<video>.csv`, và bỏ qua video đã có. Nếu phiên Colab bị ngắt, chỉ cần Run all lại.
+- **Học mô hình rủi ro một lần rồi lưu điểm** vào `risk_scores.csv.gz`.
+
+```bash
+python scripts/run_sam3_dispatch.py --data datasets/FastTracker/train --precision fp16 \
+    --run task_night_occlusion task_day_right_turn_occlusion --out outputs/dispatch_sam3_all
+python scripts/run_sam3_dispatch.py --out outputs/dispatch_sam3_all --summary-only \
+    --old outputs/dispatch_sam3/sweep_per_sequence.csv          # gộp 2 video đã chạy trước (không có thời gian)
+python scripts/run_sam3_dispatch.py --data ... --backend oracle --out /tmp/dry  # chạy thử cả chuỗi trên CPU
+```
+
+Ước tính cho 10 video còn lại: khoảng 7 giờ T4 (±30%), thường cần 2–3 phiên Colab.
+
 Kết quả:
 - `model_metrics_*.json`: ROC-AUC, PR-AUC của mô hình so với dùng margin đơn thuần;
 - `sweep_summary.csv`: chi phí (số cửa sổ, số khung VOS) so với IDSW, IDF1 cho từng chính sách;
@@ -227,7 +244,7 @@ Cùng thiết lập với 473 lỗi trong báo cáo (ByteTrack trên phát hiệ
 python scripts/export_switch_examples.py --data datasets/FastTracker/train --remote --out outputs/switch_examples --per-type 3
 ```
 
-Kết quả: `fragment_1.mp4`, `swap_1.mp4`, `takeover_1.mp4`… (960×540, phát chậm 2 lần), ảnh `.png` cùng tên và `examples.csv`. Vẫn cần xem bằng mắt để chọn: một "lỗi" có thể là lỗi nhãn. Trên Colab (chỉ CPU) dùng `notebooks/colab_switch_examples.ipynb`: notebook tự clone repo, tải nhãn, cắt clip, cho xem từng clip và tải 3 clip đã chọn về máy.
+Kết quả: `fragment_1.mp4`, `swap_1.mp4`, `takeover_1.mp4`… (960×540, phát chậm 2 lần), ảnh `.png` cùng tên và `examples.csv`. Vẫn cần xem bằng mắt để chọn: một "lỗi" có thể là lỗi nhãn. Trên Colab (chỉ CPU) dùng `notebooks/colab_switch_examples.ipynb` và bấm Run all: notebook tự clone repo, ghi bản script nhúng sẵn, tải nhãn, cắt clip, thống kê số lỗi xảy ra ở mép ảnh (`border_stats.csv`), lấy clip tốt nhất mỗi kiểu vào `chosen/` và tải về một tệp zip.
 
 ## Những điều cần ghi rõ khi báo cáo
 

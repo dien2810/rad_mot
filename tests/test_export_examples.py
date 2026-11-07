@@ -71,3 +71,14 @@ def test_export_renders_clip_and_poster(tmp_path):
         src.close()
     assert how == "img1" and f0 < int(ev["frame"]) <= f1
     assert out.stat().st_size > 1000 and poster.exists()
+
+
+def test_clip_start_shows_the_old_track():
+    # old track 5 last seen at frame 60, switch at 100, 30 fps, pre-roll 1.5 s
+    tracks = np.array([[f, 5, 0, 0, 10, 10, 1, -1, -1] for f in range(20, 61)] +
+                      [[f, 12, 0, 0, 10, 10, 1, -1, -1] for f in range(100, 120)], float)
+    ev = dict(frame=100, prev_trk=5, new_trk=12, type="fragment")
+    f0, last = ex.clip_start(ev, tracks, 30, 1.5, 6.0)
+    assert last == 60 and f0 == 60 - 21                        # 0.7 s before the last sighting
+    assert ex.clip_start(ev, tracks, 30, 1.5, 1.0)[0] == 70    # capped by max_pre
+    assert ex.clip_start({**ev, "type": "swap"}, tracks, 30, 1.5, 6.0)[0] == 55  # swap: plain pre-roll

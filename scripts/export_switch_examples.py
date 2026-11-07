@@ -153,12 +153,30 @@ def frame_image(img, g: int, ev: dict, ctx: dict, crop: tuple, tag_until: int, k
     return draw_texts(panel, texts)
 
 
-def export(ev: dict, tr: dict, src, size: tuple, fps: float, path: str, poster: str,
-           pre_s: float, post_s: float, speed: float) -> tuple:
+def clip_start(ev: dict, tracks: np.ndarray, fps: float, pre_s: float, max_pre_s: float) -> tuple:
+    """First frame of the clip and the last frame the old track was seen before the switch.
+
+    For a fragment or takeover the old track is often already lost when the plain pre-roll
+    starts (the object is behind something), so the clip would never show "ID a". The start is
+    moved back to 0.7 s before the old track's last sighting, at most max_pre_s before the switch.
+    """
     f = int(ev["frame"])
-    f0 = max(1, f - int(round(pre_s * fps)))
+    f0 = f - int(round(pre_s * fps))
+    prev = tracks[(tracks[:, ID].astype(int) == int(ev["prev_trk"])) & (tracks[:, F] < f)]
+    last = int(prev[:, F].max()) if len(prev) else None
+    if last is not None and ev.get("type") in ("fragment", "takeover"):
+        f0 = min(f0, last - int(round(0.7 * fps)))
+    f0 = max(1, f0, f - int(round(max_pre_s * fps)))
+    return f0, last
+
+
+def export(ev: dict, tr: dict, src, size: tuple, fps: float, path: str, poster: str,
+           pre_s: float, post_s: float, speed: float, pad: float = 2.2, min_frac: float = 0.2,
+           max_pre_s: float = 6.0) -> tuple:
+    f = int(ev["frame"])
+    f0, _ = clip_start(ev, tr["tracks"], fps, pre_s, max_pre_s)
     f1 = min(tr["length"], f + int(round(post_s * fps)))
-    crop = sc.event_crop(tr["gt"], tr["tracks"], ev, f0, f1, size, pad=2.2, min_frac=0.3)
+    crop = sc.event_crop(tr["gt"], tr["tracks"], ev, f0, f1, size, pad=pad, min_frac=min_frac)
     ctx = dict(gt_by=group_by_frame(tr["gt"]), trk_by=group_by_frame(tr["tracks"]))
     tag_until = f + int(round(1.0 * fps))
     shot = min(f1, f + int(round(0.4 * fps)))
@@ -184,7 +202,11 @@ def main() -> None:
     ap.add_argument("--min-h", type=float, default=60, help="minimum box height (px) of the object")
     ap.add_argument("--pre", type=float, default=1.5, help="seconds before the switch")
     ap.add_argument("--post", type=float, default=1.5, help="seconds after the switch")
+    ap.add_argument("--max-pre", type=float, default=6.0,
+                    help="fragment/takeover: start up to this many seconds early so the old ID is visible")
     ap.add_argument("--speed", type=float, default=0.5, help="playback speed (0.5 = half speed)")
+    ap.add_argument("--pad", type=float, default=2.2, help="crop = event boxes enlarged by this factor")
+    ap.add_argument("--min-frac", type=float, default=0.2, help="crop at least this fraction of the image width")
     ap.add_argument("--types", nargs="*", default=["fragment", "swap", "takeover"],
                     choices=["fragment", "swap", "takeover"], help="switch types to export")
     ap.add_argument("--allow-border", action="store_true", help="also pick objects touching the image border")
@@ -215,7 +237,7 @@ def main() -> None:
           f"total {int(pop.at_border.sum())}/{len(pop)}")
     sel = pick(pop, args.per_type, args.min_h, tuple(args.types), args.allow_border)
     if sel.empty:
-        sys.exit("no readable switch; lower --min-h")
+        sys.exit("no readable switch after the filters (see switches_all.csv); try --min-h 40 or --allow-border")
     rows = []
     for seq_name, evs in sel.groupby("seq", sort=True):
         s, tr = tracked[seq_name]
@@ -226,8 +248,11 @@ def main() -> None:
                 k = sum(1 for r in rows if r["type"] == ev["type"]) + 1
                 name = f"{ev['type']}_{k}"
                 f0, f1 = export(ev, tr, src, size, s.fps, os.path.join(args.out, name + ".mp4"),
-                                os.path.join(args.out, name + ".png"), args.pre, args.post, args.speed)
-                rows.append({"clip": name + ".mp4", **ev, "clip_from": f0, "clip_to": f1, "frames_from": how})
+                                os.path.join(args.out, name + ".png"), args.pre, args.post, args.speed,
+                                args.pad, args.min_frac, args.max_pre)
+                _, last = clip_start(ev, tr["tracks"], s.fps, args.pre, args.max_pre)
+                rows.append({"clip": name + ".mp4", **ev, "prev_last_seen": last, "clip_from": f0, "clip_to": f1,
+                             "frames_from": how})
                 print(f"  {name}: {seq_name} frame {ev['frame']} ID {ev['prev_trk']}→{ev['new_trk']}", flush=True)
         finally:
             if src is not None:
