@@ -181,6 +181,28 @@ python scripts/run_sam3_dispatch.py --data ... --backend oracle --out /tmp/dry  
 
 Ước tính cho 10 video còn lại: khoảng 7 giờ T4 (±30%), thường cần 2–3 phiên Colab.
 
+**Nối track bị đứt (cách 3) và kiểm tra bằng SAM 3 (cách 4), detection YOLO.** `rad/link/linking.py` và `scripts/run_linking.py`; trên Colab dùng `notebooks/colab_link_yolo.ipynb` (T4, Run all).
+- Với mỗi cặp (track A vừa kết thúc, track C mới sinh gần chỗ A đang đi tới, trong 3 giây), mô hình gradient boosting dự đoán xác suất p hai track là cùng một xe. Nhãn lấy từ GT, chỉ dùng lúc học.
+- p ≥ tau_high: gộp C vào A ngay (cách 3). tau_low ≤ p < tau_high: mồi SAM 3 trên hộp sạch cuối cùng của A, lan truyền đến lúc C xuất hiện, chỉ gộp nếu mask nằm trên C (cách 4). Mọi lần gộp là một-một.
+- Mô hình học ngoài tập theo video; hai ngưỡng được chọn bên trong phần huấn luyện, nên không dùng nhãn của video đang chấm.
+- Báo cáo 4 dòng mỗi video: `bytetrack`, `link_upper` (gộp đúng mọi cặp thật, là trần của cách nối), `link`, `link_verify`; kèm số lần gộp sai và số lần gọi SAM 3.
+
+```bash
+python scripts/detect_yolo.py --data datasets/FastTracker/train --weights yolo11x.pt --out outputs/dets_yolo --half --skip-existing
+python scripts/run_linking.py --data datasets/FastTracker/train --dets dir --det-dir outputs/dets_yolo --backend oracle --out outputs/link_yolo/oracle
+python scripts/run_linking.py ... --backend sam3 --precision fp16 --frames-on-gpu --max-verify 10 --out outputs/link_yolo/sam3
+```
+
+**So sánh tracker thuần trên cùng hộp YOLO.** `scripts/run_trackers.py`; trên Colab dùng `notebooks/colab_trackers.ipynb` (chỉ cần CPU, dùng lại hộp YOLO trên Drive).
+- **Các tracker:** ByteTrack của đề tài, OC-SORT mã gốc (`git clone https://github.com/noahcao/OC_SORT`, tham số mặc định của repo), và OC-SORT bật lượt ghép BYTE.
+- **`--link`:** chạy thêm mỗi tracker kèm bước nối track (cách 3). Mô hình học trên chính track của tracker đó.
+- **Chỉ số:** IDSW (chia theo kiểu lỗi), IDF1, MOTA, HOTA/DetA/AssA (TrackEval), tốc độ tracker và tốc độ cả pipeline (cộng thời gian YOLO đã đo).
+
+```bash
+python scripts/run_trackers.py --data datasets/FastTracker/train --dets dir --det-dir outputs/dets_yolo \
+    --ocsort-dir OC_SORT --link --out outputs/trackers_yolo
+```
+
 Kết quả:
 - `model_metrics_*.json`: ROC-AUC, PR-AUC của mô hình so với dùng margin đơn thuần;
 - `sweep_summary.csv`: chi phí (số cửa sổ, số khung VOS) so với IDSW, IDF1 cho từng chính sách;

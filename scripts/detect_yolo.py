@@ -34,12 +34,20 @@ def main() -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--half", action="store_true", help="fp16 inference (faster on T4)")
+    ap.add_argument("--seqs", nargs="*", default=None, help="only these sequences")
+    ap.add_argument("--skip-existing", action="store_true", help="skip sequences whose <out>/<seq>.txt exists")
     args = ap.parse_args()
     from ultralytics import YOLO
 
     model = YOLO(args.weights)
     os.makedirs(args.out, exist_ok=True)
     for s in discover_sequences(args.data):
+        if args.seqs and s.name not in args.seqs:
+            continue
+        out_path = os.path.join(args.out, f"{s.name}.txt")
+        if args.skip_existing and os.path.exists(out_path):
+            print(f"{s.name}: {out_path} exists, skipped")
+            continue
         paths = s.frame_paths()
         if not paths:
             print(f"{s.name}: no frames (run scripts/extract_frames.py first)")
@@ -60,7 +68,9 @@ def main() -> None:
                 for (x1, y1, x2, y2), c, k_cls in zip(xyxy, conf, cls):
                     rows.append([frame, -1, x1, y1, x2 - x1, y2 - y1, c, COCO_TO_FASTTRACKER.get(int(k_cls), -1), -1])
         arr = np.asarray(rows, dtype=float) if rows else np.zeros((0, 9))
-        write_mot_txt(os.path.join(args.out, f"{s.name}.txt"), arr, tracker_format=False)
+        tmp = out_path + ".part"
+        write_mot_txt(tmp, arr, tracker_format=False)
+        os.replace(tmp, out_path)  # a run killed mid-sequence leaves no half-written file
         print(f"{s.name}: {len(arr)} detections over {len(paths)} frames")
 
 

@@ -55,8 +55,23 @@ SCORE = "p_y_risk"
 ORDER = {"learned": 0, "smp": 1, "smp+birth": 2}  # RAD first: nothing in any cache yet
 
 
+def release_memory() -> None:
+    """Return freed heap pages to the OS (glibc keeps them otherwise, so RSS creeps up per window)."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 class CountingBackend:
-    """Counts the frames the VOS model really produces (cache replays are not counted)."""
+    """Counts the frames the VOS model really produces (cache replays are not counted).
+
+    Also trims the heap after every window: a SAM 3 window holds up to 150 frames
+    (~1.8 GB at 1008 px when they live in CPU RAM), and Colab kills the process
+    without a Python error once RAM passes ~12.7 GB.
+    """
 
     def __init__(self, inner):
         self.inner = inner
@@ -66,9 +81,14 @@ class CountingBackend:
         return getattr(self.inner, k)
 
     def propagate(self, start_frame, box_xyxy, max_len):
-        for item in self.inner.propagate(start_frame, box_xyxy, max_len):
-            self.frames += 1
-            yield item
+        gen = self.inner.propagate(start_frame, box_xyxy, max_len)
+        try:
+            for item in gen:
+                self.frames += 1
+                yield item
+        finally:
+            gen.close()
+            release_memory()
 
 
 def parse_policies(items: list[str]) -> list[tuple[str, float]]:
@@ -144,7 +164,8 @@ def warm_up(sd, kw: dict) -> None:
 def run_video(sd, cfg, policies, backend: str, kw: dict, cheap: dict) -> list[dict]:
     p = SMPParams(**{**asdict(cfg["smp"]), "image_size": sd.size})
     fps_video = float(sd.seq.fps or 30)
-    common = dict(seq=sd.name, frames=sd.length, video_fps=fps_video)
+    common = dict(seq=sd.name, frames=sd.length, video_fps=fps_video,
+                  frames_on_gpu=int(backend == "sam3" and kw.get("offload_video_to_cpu", True) is False))
     base = evaluate(sd.gt, sd.tracks)
     rows = [dict(**common, policy="bytetrack", param=0.0, windows=0, vos_frames=0, model_frames=0, triggers=0,
                  idsw=base["idsw"], idf1=base["idf1"], mota=base["mota"], n_swap=0,
@@ -161,7 +182,7 @@ def run_video(sd, cfg, policies, backend: str, kw: dict, cheap: dict) -> list[di
             trig = pol.smp_plus_births(sd.log, sd.cands, param, p.gap_G)
         t1 = time.perf_counter()
         counter = CountingBackend(make_backend(backend, sd, **kw))
-        be = CachingBackend(counter, max_frames=4000) if backend == "sam3" else counter
+        be = CachingBackend(counter, max_frames=1500) if backend == "sam3" else counter  # <= ~0.4 GB of masks
         corrected, wins, stats = run_smp(sd.tracks, sd.log, be, trig, sd.length, p)
         t2 = time.perf_counter()
         ev = evaluate(sd.gt, corrected)
@@ -174,7 +195,7 @@ def run_video(sd, cfg, policies, backend: str, kw: dict, cheap: dict) -> list[di
                          sec_score=cheap["sec_score"] if name == "learned" else 0.0,
                          sec_select=t1 - t0, sec_vos=t2 - t1))
         del be, counter, corrected, wins
-        gc.collect()
+        release_memory()
         try:
             import torch
             if torch.cuda.is_available():
@@ -209,7 +230,7 @@ def bootstrap(per: pd.DataFrame, a: str, b: str, col: str, n_boot: int = 20000, 
                 hi=float(np.percentile(r, 97.5)), videos=int(len(piv)))
 
 
-def summarise(out: str, old: str | None = None) -> pd.DataFrame:
+def summarise(out: str, old: str | None = None, verbose: bool = True) -> pd.DataFrame:
     files = sorted(glob.glob(os.path.join(out, "per_seq", "*.csv")))
     if not files:
         sys.exit(f"no results in {out}/per_seq")
@@ -222,7 +243,8 @@ def summarise(out: str, old: str | None = None) -> pd.DataFrame:
         if len(o):
             o["source"] = "sam3_old_untimed"
             per = pd.concat([new, o], ignore_index=True)
-            print(f"[summary] + {o.seq.nunique()} video(s) from {old} (counts only, no timing)")
+            if verbose:
+                print(f"[summary] + {o.seq.nunique()} video(s) from {old} (counts only, no timing)")
     per.to_csv(os.path.join(out, "all_per_seq.csv"), index=False)
     key = ["policy", "param"]
     g = per.groupby(key)
@@ -259,7 +281,8 @@ def summarise(out: str, old: str | None = None) -> pd.DataFrame:
     txt = "\n".join(lines)
     with open(os.path.join(out, "summary.md"), "w") as fh:
         fh.write(txt + "\n")
-    print(txt)
+    if verbose:
+        print(txt)
     return summ
 
 
@@ -303,20 +326,27 @@ def main() -> None:
     unknown = [s for s in order if s not in by_name]
     if unknown:
         sys.exit(f"unknown video(s): {unknown}; available: {sorted(by_name)}")
+    done = {os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(args.out, "per_seq", "*.csv"))}
+    # the other videos were only needed to train the risk model: free them before SAM 3 starts
+    keep = {n for n in order if n not in done}
+    for n in list(by_name):
+        if n not in keep:
+            del by_name[n]
+    del data
+    release_memory()
     kw = dict(cfg["oracle_backend"] if args.backend == "oracle" else cfg["sam3_backend"])
     if args.backend == "sam3":
         kw["precision"] = args.precision
         if args.frames_on_gpu:
             kw["offload_video_to_cpu"] = False
-    done = {os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(args.out, "per_seq", "*.csv"))}
     todo = [n for n in order if n not in done and (args.backend == "oracle" or by_name[n].seq.frame_paths())]
     if args.backend == "sam3" and todo:
         warm_up(by_name[todo[0]], kw)
     for name in order:
-        sd = by_name[name]
         if name in done:
             print(f"[skip] {name}: already in {args.out}/per_seq")
             continue
+        sd = by_name[name]
         if args.backend == "sam3" and not sd.seq.frame_paths():
             print(f"[skip] {name}: no img1/ frames")
             continue
@@ -325,6 +355,9 @@ def main() -> None:
         rows = run_video(sd, cfg, policies, args.backend, kw, cheap)
         pd.DataFrame(rows).to_csv(os.path.join(args.out, "per_seq", f"{name}.csv"), index=False)
         print(f"[done] {name} in {(time.perf_counter() - t) / 60:.1f} min -> per_seq/{name}.csv", flush=True)
+        summarise(args.out, args.old, verbose=False)  # keep summary.csv/.md current if the session dies later
+        del by_name[name], sd
+        release_memory()
     summarise(args.out, args.old)
 
 

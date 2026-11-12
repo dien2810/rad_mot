@@ -32,6 +32,7 @@ def test_runs_resumes_and_summarises(tmp_path):
     assert smp.sec_candidates == 0 and smp.sec_score == 0 and rad.sec_candidates > 0
     assert (per.fps > 0).all() and (per.sec_total >= per.sec_vos).all()
     assert (per.model_frames <= per.vos_frames + 3).all()
+    assert "frames_on_gpu" in per and (per.frames_on_gpu == 0).all()
 
     # second call: S0 and S2 are skipped, S1 runs, cached scores are reused
     log = _run("--data", str(data), "--backend", "oracle", "--out", str(out))
